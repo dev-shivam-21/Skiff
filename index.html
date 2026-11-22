@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skiff – send files between your devices</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--mist:#e8eff1;--harbor:#10303b;--deep:#0a1f27;--signal:#f2c230;--foam:#fff;--line:#c5d3d8;--ok:#1f8a5b;--bad:#b3362d;
+--bg:var(--mist);--ink:var(--harbor);--card:var(--foam);--muted:#5b7782}
+@media(prefers-color-scheme:dark){:root{--bg:var(--deep);--ink:#e3eef1;--card:#12313c;--line:#24505f;--muted:#8fb0bb}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:"Bricolage Grotesque",system-ui,sans-serif;display:flex;justify-content:center;padding:32px 16px}
+main{width:100%;max-width:520px}
+h1{font-size:clamp(2.6rem,9vw,3.8rem);font-weight:800;letter-spacing:-.04em;margin:0 0 6px;line-height:1}
+.sub{color:var(--muted);margin:0 0 28px;font-size:1.05rem}
+.panel{background:var(--card);border:1.5px solid var(--line);border-radius:18px;padding:22px;margin-bottom:16px}
+.panel h2{margin:0 0 12px;font-size:1.05rem;font-weight:600}
+button{font:inherit;font-weight:600;border:0;border-radius:12px;padding:12px 18px;cursor:pointer;background:var(--ink);color:var(--bg)}
+button.signal{background:var(--signal);color:#10303b}
+button:focus-visible,input:focus-visible{outline:3px solid var(--signal);outline-offset:2px}
+input{font:inherit;font-size:1.3rem;letter-spacing:.25em;text-transform:uppercase;width:100%;padding:12px 14px;border-radius:12px;border:1.5px solid var(--line);background:transparent;color:var(--ink);margin-bottom:10px}
+.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1}
+#qr{display:flex;justify-content:center;padding:14px;background:#fff;border-radius:14px;width:fit-content;margin:0 auto 12px}
+.code{text-align:center;font-size:2.2rem;font-weight:800;letter-spacing:.3em;margin:4px 0}
+.hint{text-align:center;color:var(--muted);font-size:.95rem;margin:0}
+.status{display:flex;align-items:center;gap:10px;font-weight:600;margin-bottom:14px}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--muted)}
+.dot.on{background:var(--ok)}.dot.err{background:var(--bad)}
+#drop{border:2px dashed var(--line);border-radius:14px;padding:30px 16px;text-align:center;cursor:pointer;color:var(--muted)}
+#drop.over{border-color:var(--signal);background:rgba(242,194,48,.12);color:var(--ink)}
+.item{padding:12px 0;border-top:1px solid var(--line)}.item:first-child{border-top:0}
+.item .top{display:flex;justify-content:space-between;gap:10px;font-weight:600;word-break:break-all}
+.item .meta{color:var(--muted);font-size:.9rem;margin-top:2px}
+.bar{height:8px;border-radius:99px;background:var(--line);overflow:hidden;margin-top:8px}
+.bar i{display:block;height:100%;width:0;background:var(--signal);transition:width .15s}
+.item a{color:var(--ok);font-weight:600}
+.hidden{display:none!important}
+.empty{color:var(--muted);margin:0}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Skiff</h1>
+  <p class="sub">Send files between your devices. Nothing to install, no account.</p>
+
+  <section id="pair">
+    <div class="panel">
+      <h2>Start on this device</h2>
+      <button class="signal" id="create" style="width:100%">Create a connection</button>
+    </div>
+    <div class="panel">
+      <h2>Join from another device</h2>
+      <input id="codeIn" maxlength="5" placeholder="CODE" aria-label="Connection code" autocomplete="off">
+      <button id="join" style="width:100%">Join</button>
+      <p class="hint" style="margin-top:10px">Or scan the QR code shown on the other device with your camera.</p>
+    </div>
+  </section>
+
+  <section id="wait" class="panel hidden">
+    <div id="qr"></div>
+    <div class="code" id="codeShow"></div>
+    <p class="hint">Scan this with your other device, or enter the code there.</p>
+    <div class="row" style="margin-top:14px"><button id="copy">Copy link</button><button id="cancel">Cancel</button></div>
+  </section>
+
+  <section id="app" class="hidden">
+    <div class="panel">
+      <div class="status"><span class="dot" id="dot"></span><span id="stat">Connecting…</span></div>
+      <div id="drop" tabindex="0" role="button" aria-label="Choose files to send">Drop files here or tap to choose</div>
+      <input type="file" id="file" multiple class="hidden">
+    </div>
+    <div class="panel"><h2>Transfers</h2><div id="list"><p class="empty">No transfers yet.</p></div></div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const CHUNK = 16 * 1024, MAX_BUF = 1 << 20;
+let ws, pc, dc, room, initiator = false, incoming = null, queue = Promise.resolve();
+
+const show = (id) => ["pair", "wait", "app"].forEach((s) => $(s).classList.toggle("hidden", s !== id));
+const fmt = (b) => b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : b < 1073741824 ? (b / 1048576).toFixed(1) + " MB" : (b / 1073741824).toFixed(2) + " GB";
+const setStatus = (t, c) => { $("stat").textContent = t; $("dot").className = "dot " + (c || ""); };
+const link = () => `${location.origin}${location.pathname}?r=${room}`;
+
+let polling = false;
+const myId = Math.random().toString(36).slice(2, 10);
+const api = (body) => fetch("signal.php", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ room, id: myId, ...body }) }).then((r) => r.json());
+
+async function handle(m) {
+  if (m.type === "full") { alert("That connection already has two devices."); reset(); }
+  if (m.type === "joined" && m.peers === 2) { initiator = false; show("app"); setStatus("Connecting…"); startPeer(); }
+  if (m.type === "peer-joined") { initiator = true; show("app"); setStatus("Connecting…"); startPeer(); }
+  if (m.type === "peer-left") setStatus("Other device left", "err");
+  if (m.type === "offer") { await pc.setRemoteDescription(m.sdp); const a = await pc.createAnswer(); await pc.setLocalDescription(a); ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription })); }
+  if (m.type === "answer") await pc.setRemoteDescription(m.sdp);
+  if (m.type === "ice" && m.candidate) try { await pc.addIceCandidate(m.candidate); } catch {}
+}
+
+function poll() {
+  if (!polling) return;
+  setTimeout(async () => {
+    try { const r = await api({ action: "poll" }); for (const m of r.msgs || []) await handle(m); } catch {}
+    poll();
+  }, 700);
+}
+
+function connectWS(code) {
+  room = code; polling = true;
+  ws = {
+    send: (s) => api({ action: "send", msg: JSON.parse(s) }).catch(() => {}),
+    close: () => { polling = false; navigator.sendBeacon("signal.php", JSON.stringify({ room, id: myId, action: "leave" })); }
+  };
+  api({ action: "join" }).then(async (m) => { await handle(m); poll(); }).catch(() => setStatus("Server unreachable", "err"));
+}
+
+function startPeer() {
+  pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  pc.onicecandidate = (e) => e.candidate && ws.send(JSON.stringify({ type: "ice", candidate: e.candidate }));
+  pc.onconnectionstatechange = () => { if (["failed", "disconnected"].includes(pc.connectionState)) setStatus("Connection lost", "err"); };
+  if (initiator) {
+    setupDC(pc.createDataChannel("files"));
+    pc.createOffer().then((o) => pc.setLocalDescription(o)).then(() => ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription })));
+  } else pc.ondatachannel = (e) => setupDC(e.channel);
+}
+
+function setupDC(ch) {
+  dc = ch; dc.binaryType = "arraybuffer"; dc.bufferedAmountLowThreshold = MAX_BUF / 2;
+  dc.onopen = () => { polling = false; setStatus("Connected directly to your other device", "on"); };
+  dc.onclose = () => setStatus("Connection closed", "err");
+  dc.onmessage = onData;
+}
+
+function addItem(id, name, size, dir) {
+  if ($("list").querySelector(".empty")) $("list").innerHTML = "";
+  const d = document.createElement("div"); d.className = "item"; d.id = id;
+  d.innerHTML = `<div class="top"><span></span><span>${dir}</span></div><div class="meta"></div><div class="bar"><i></i></div>`;
+  d.querySelector("span").textContent = name;
+  d.querySelector(".meta").textContent = fmt(size);
+  $("list").prepend(d); return d;
+}
+function progress(d, done, total, t0) {
+  d.querySelector("i").style.width = (done / total * 100) + "%";
+  const s = (Date.now() - t0) / 1000 || 1, sp = done / s;
+  d.querySelector(".meta").textContent = `${fmt(done)} of ${fmt(total)} · ${fmt(sp)}/s · ${Math.ceil((total - done) / sp)}s left`;
+}
+
+function sendFile(file) {
+  return new Promise(async (resolve) => {
+    const id = "t" + Date.now() + Math.random().toString(36).slice(2, 6);
+    const el = addItem(id, file.name, file.size, "Sending"), t0 = Date.now();
+    dc.send(JSON.stringify({ t: "meta", name: file.name, size: file.size, type: file.type }));
+    for (let off = 0; off < file.size; off += CHUNK) {
+      if (dc.readyState !== "open") { el.querySelector(".meta").textContent = "Failed: connection closed"; return resolve(); }
+      if (dc.bufferedAmount > MAX_BUF) await new Promise((r) => (dc.onbufferedamountlow = r));
+      dc.send(await file.slice(off, off + CHUNK).arrayBuffer());
+      if ((off / CHUNK) % 8 === 0) progress(el, off, file.size, t0);
+    }
+    dc.send(JSON.stringify({ t: "end" }));
+    el.querySelector("i").style.width = "100%";
+    el.querySelector(".meta").textContent = `Sent · ${fmt(file.size)}`;
+    resolve();
+  });
+}
+
+function onData(e) {
+  if (typeof e.data === "string") {
+    const m = JSON.parse(e.data);
+    if (m.t === "meta") incoming = { ...m, parts: [], got: 0, t0: Date.now(), el: addItem("r" + Date.now(), m.name, m.size, "Receiving") };
+    if (m.t === "end" && incoming) {
+      const url = URL.createObjectURL(new Blob(incoming.parts, { type: incoming.type }));
+      const { el, name, size } = incoming; el.querySelector("i").style.width = "100%";
+      const meta = el.querySelector(".meta"); meta.textContent = `Received · ${fmt(size)} · `;
+      const a = document.createElement("a"); a.href = url; a.download = name; a.textContent = "Save file"; meta.append(a);
+      a.click(); incoming = null;
+    }
+    return;
+  }
+  if (!incoming) return;
+  incoming.parts.push(e.data); incoming.got += e.data.byteLength;
+  progress(incoming.el, incoming.got, incoming.size, incoming.t0);
+}
+
+function queueFiles(files) {
+  if (!dc || dc.readyState !== "open") return alert("Wait until the devices are connected.");
+  [...files].forEach((f) => (queue = queue.then(() => sendFile(f))));
+}
+
+function reset() { ws?.close(); pc?.close(); dc = pc = ws = null; history.replaceState(null, "", location.pathname); show("pair"); }
+
+$("create").onclick = () => {
+  const c = Array.from(crypto.getRandomValues(new Uint8Array(5)), (b) => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[b % 32]).join("");
+  connectWS(c); show("wait"); $("codeShow").textContent = c;
+  $("qr").innerHTML = ""; new QRCode($("qr"), { text: link(), width: 180, height: 180 });
+};
+$("join").onclick = () => { const c = $("codeIn").value.trim().toUpperCase(); if (c.length === 5) { connectWS(c); show("app"); setStatus("Connecting…"); } else $("codeIn").focus(); };
+$("cancel").onclick = reset;
+$("copy").onclick = async () => { await navigator.clipboard.writeText(link()); $("copy").textContent = "Copied"; setTimeout(() => ($("copy").textContent = "Copy link"), 1500); };
+$("drop").onclick = () => $("file").click();
+$("drop").onkeydown = (e) => (e.key === "Enter" || e.key === " ") && $("file").click();
+$("file").onchange = (e) => { queueFiles(e.target.files); e.target.value = ""; };
+["dragover", "dragenter"].forEach((ev) => $("drop").addEventListener(ev, (e) => { e.preventDefault(); $("drop").classList.add("over"); }));
+["dragleave", "drop"].forEach((ev) => $("drop").addEventListener(ev, (e) => { e.preventDefault(); $("drop").classList.remove("over"); }));
+$("drop").addEventListener("drop", (e) => queueFiles(e.dataTransfer.files));
+
+const r = new URLSearchParams(location.search).get("r");
+if (r) { connectWS(r.toUpperCase()); show("app"); setStatus("Connecting…"); }
+</script>
+</body>
+</html>
